@@ -1,0 +1,81 @@
+(use std/process [ExitReason Selector Pid Subject])
+(use std/process)
+(use std/result [Result])
+(use std/option [Option])
+(use std/unknown)
+
+(pub type ['s 'm] Next
+  [(Continue ~ ContinuePayload 's 'm)
+   (Stop ~ ExitReason)])
+
+(pub type ['s 'm] ContinuePayload
+  [(:state ~ 's)
+   (:selector ~ (Option (Selector 'm)))])
+
+(pub let continue {state}
+  (Continue (ContinuePayload :state state :selector None)))
+
+(pub let stop {}
+  (Stop Normal))
+
+(pub let stop_abnormal {reason}
+  (Stop (Abnormal (unknown/from_string reason))))
+
+(pub let with_selctor {value selector}
+  (match value
+    (Continue payload) ~> (Continue
+      (ContinuePayload :state (:state payload) :selector (Some selector)))
+    (Stop _) ~> value))
+
+(pub type ['d] Started
+  [(:pid ~ Pid)
+   (:data ~ 'd)])
+
+(pub type ['s 'm 'd] Initialised
+  [(:state ~ 's)
+   (:selector ~ (Option (Selector 'm)))
+   (:return ~ 'd)])
+
+(pub let initialised {state}
+  (Initialised :state state :selector None :return ()))
+
+(pub let returning {result initialised}
+  (with initialised
+    :return result))
+
+(pub type ['s 'm 'r] Builder
+  [(:initialise ~ ((Subject 'm) -> (Result (Initialised 's 'm 'r) String)))
+   (:initialisation_timeout ~ Int)
+   (:name ~ (Option (process/Name 'm)))
+   (:on_message ~ ('s -> 'm -> Next 's 'm))])
+
+(pub let new {state}
+  (let [init (f {subject} ->
+          (|> (initialised state)
+              (returning subject)
+              Ok))]
+    (Builder
+      :initialise init
+      :initialisation_timeout 1000
+      :on_message (f {state _} -> (continue state))
+      :name None)))
+
+(pub let new_with_initialiser {timeout initialise}
+  (Builder
+    :initialise initialise
+    :initialisation_timeout timeout
+    :on_message (f {state _} -> (continue state))
+    :name None))
+
+(pub let on_message {builder handler}
+  (with builder
+    :on_message handler))
+
+(pub let named {builder name}
+  (with builder
+    :name (Some name)))
+
+(pub type StartError
+  [InitTimeout
+   (InitFailed ~ String)
+   (InitExited ~ ExitReason)])
