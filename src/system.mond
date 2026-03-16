@@ -1,0 +1,27 @@
+(use std/process [Pid])
+(use std/atom [Atom])
+(use std/unknown [Unknown])
+
+(pub type Mode
+  [Running
+   Suspended])
+
+(pub type DebugOption
+  [NoDebug])
+
+(pub extern type DebugState)
+
+(pub type StatusInfo
+  [(:module ~ Atom)
+   (:parent ~ Pid)
+   (:debug_state ~ DebugState)
+   (:state ~ Unknown)
+   (:mode ~ Mode)])
+
+(pub type SystemMessage
+  [(Resume ~ (Unit -> Unit))
+   (Suspend ~ (Unit -> Unit))
+   (GetState ~ (Unknown -> Unit))
+   (GetStatus ~ (StatusInfo -> Unit))])
+
+(pub extern let debug_state ~ (List DebugOption -> DebugState) sys/debug_options)
