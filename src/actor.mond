@@ -164,23 +164,13 @@
 
 (let receive_message {self}
   (let [base_selector (match (:mode self)
-                       Suspended ~> (process/new_selector)
-                       Running ~> (|> (process/new_selector)
-                                      (process/select_other Unexpected)
-                                      (process/merge_selector (:selector self))))
+          Suspended ~> (process/new_selector)
+          Running ~> (|> (process/new_selector)
+                         (process/select_other Unexpected)
+                         (process/merge_selector (:selector self))))
         selector (select_system_messages base_selector)]
     (process/selector_receive_forever selector)))
 
-;; (let handle_system_message {system_message state}
-;;   (match system_message
-;;     (GetState callback) ~> (
-;;     do (callback (erase (:state self))
-;;       (loop  )
-;;
-;;     )
-;;     (Resume callback) ~> (io/debug "todo")
-;;     (Suspend callback) ~> (io/debug "todo")
-;;     (GetStatus callback) ~> (io/debug "todo")) 
 (let loop {self}
   (match (receive_message self)
     (System s) ~>
@@ -201,8 +191,7 @@
         (GetStatus callback) ~>
           (do (callback (process_status_info self))
               (loop self)))
-    (Unexpected message) ~>
-      (loop self)
+    (Unexpected _) ~> (loop self)
     (Message msg) ~>
       (match ((:message_handler self) (:state self) msg)
         (Stop reason) ~> (exit_process reason)
@@ -220,11 +209,11 @@
 ;;;  Init was OK, send the subject to the parent and start handling messages.
 (let run_actor_init_sucess {subject init_result ack parent builder}
   (let [base_selector (match (:selector init_result)
-                        (Some x) ~> x
-                        None ~> (process/select_map
-                                  subject
-                                  (f {value} -> value)
-                                  (process/new_selector)))
+          (Some x) ~> x
+          None ~> (process/select_map
+                    subject
+                    (f {value} -> value)
+                    (process/new_selector)))
         selector (process/map_selector Message base_selector)]
     (do (process/send ack (Ok (:return init_result)))
         (let [state (:state init_result)

@@ -1,0 +1,155 @@
+(use otp/actor)
+(use otp/static_supervisor)
+(use otp/supervision)
+(use std/process)
+(use std/result [Result])
+(use std/testing [assert_eq assert_ne])
+
+(type StartedChild
+  [(StartedChild ~ String process/Pid)])
+
+(let expect_ok {result message}
+  (match result
+    (Ok value) ~> (Ok value)
+    (Error _) ~> (Error message)))
+
+(let expect_timeout {result}
+  (match result
+    (Error err) ~> (assert_eq (process/error_kind err) "timeout")
+    (Ok _) ~> (Error "expected timeout")))
+
+(let next_child_pid {subject expected_name}
+  (match (process/receive_timeout subject 300)
+    (Ok (StartedChild name pid)) ~> (let? [_ (assert_eq name expected_name)]
+                                      (Ok pid))
+    (Error _) ~> (Error "timed out waiting for child start")
+    (Ok _) ~> (Error "unexpected child start notice")))
+
+(let cleanup_supervisor {pid}
+  (do (process/send_exit pid)
+      (process/sleep 50)))
+
+(let ensure_supervisor_stopped {pid}
+  (do (cleanup_supervisor pid)
+      (assert_eq (process/is_alive pid) False)))
+
+(let actor_child {init loop}
+  (supervision/worker (f {} ->
+    (|> (actor/new_with_initialiser 50 init)
+        (actor/on_message loop)
+        actor/start))))
+
+(let init_notifier_child {subject name}
+  (actor_child
+    (f {_subject} ->
+      (do (process/send subject (StartedChild name (process/self)))
+          (Ok (actor/initialised name))))
+    (f {state _msg} -> (actor/continue state))))
+
+(let one_for_one_case {}
+  (let [subject (process/new_subject)]
+    (let? [started (expect_ok
+             (|> (static_supervisor/new static_supervisor/OneForOne)
+                 (static_supervisor/add (init_notifier_child subject "1"))
+                 (static_supervisor/add (init_notifier_child subject "2"))
+                 (static_supervisor/add (init_notifier_child subject "3"))
+                 static_supervisor/start)
+             "static supervisor failed to start")]
+      (let [supervisor_pid (:pid started)]
+        (let? [p1 (next_child_pid subject "1")]
+          (let? [p2 (next_child_pid subject "2")]
+            (let? [p3 (next_child_pid subject "3")]
+              (let? [_ (expect_timeout (process/receive_timeout subject 50))]
+                (do (process/kill p1)
+                    (let? [p1_2 (next_child_pid subject "1")]
+                      (let? [_ (assert_ne p1_2 p1)]
+                        (let? [_ (expect_timeout
+                                 (process/receive_timeout subject 50))]
+                          (let? [_ (assert_eq (process/is_alive p1) False)]
+                            (let? [_ (assert_eq (process/is_alive p1_2) True)]
+                              (let? [_ (assert_eq (process/is_alive p2) True)]
+                                (let? [_ (assert_eq (process/is_alive p3) True)]
+                                  (ensure_supervisor_stopped supervisor_pid)))))))))))))))))
+
+(let rest_for_one_case {}
+  (let [subject (process/new_subject)]
+    (let? [started (expect_ok
+             (|> (static_supervisor/new static_supervisor/RestForOne)
+                 (static_supervisor/add (init_notifier_child subject "1"))
+                 (static_supervisor/add (init_notifier_child subject "2"))
+                 (static_supervisor/add (init_notifier_child subject "3"))
+                 static_supervisor/start)
+             "static supervisor failed to start")]
+      (let [supervisor_pid (:pid started)]
+        (let? [p1 (next_child_pid subject "1")]
+          (let? [p2 (next_child_pid subject "2")]
+            (let? [p3 (next_child_pid subject "3")]
+              (let? [_ (expect_timeout (process/receive_timeout subject 50))]
+                (do (process/kill p1)
+                    (let? [p1_2 (next_child_pid subject "1")]
+                      (let? [p2_2 (next_child_pid subject "2")]
+                        (let? [p3_2 (next_child_pid subject "3")]
+                          (let? [_ (assert_ne p1_2 p1)]
+                            (let? [_ (assert_ne p2_2 p2)]
+                              (let? [_ (assert_ne p3_2 p3)]
+                                (let? [_ (expect_timeout
+                                         (process/receive_timeout subject 50))]
+                                  (ensure_supervisor_stopped supervisor_pid)))))))))))))))))
+
+(let one_for_all_case {}
+  (let [subject (process/new_subject)]
+    (let? [started (expect_ok
+             (|> (static_supervisor/new static_supervisor/OneForAll)
+                 (static_supervisor/add (init_notifier_child subject "1"))
+                 (static_supervisor/add (init_notifier_child subject "2"))
+                 (static_supervisor/add (init_notifier_child subject "3"))
+                 static_supervisor/start)
+             "static supervisor failed to start")]
+      (let [supervisor_pid (:pid started)]
+        (let? [p1 (next_child_pid subject "1")]
+          (let? [p2 (next_child_pid subject "2")]
+            (let? [p3 (next_child_pid subject "3")]
+              (let? [_ (expect_timeout (process/receive_timeout subject 50))]
+                (do (process/kill p2)
+                    (let? [p1_2 (next_child_pid subject "1")]
+                      (let? [p2_2 (next_child_pid subject "2")]
+                        (let? [p3_2 (next_child_pid subject "3")]
+                          (let? [_ (assert_ne p1_2 p1)]
+                            (let? [_ (assert_ne p2_2 p2)]
+                              (let? [_ (assert_ne p3_2 p3)]
+                                (let? [_ (expect_timeout
+                                         (process/receive_timeout subject 50))]
+                                  (ensure_supervisor_stopped supervisor_pid)))))))))))))))))
+
+(let duplicate_child_case {}
+  (let [subject (process/new_subject)
+        spec (init_notifier_child subject "same")]
+    (let? [started (expect_ok
+             (|> (static_supervisor/new static_supervisor/OneForAll)
+                 (static_supervisor/add spec)
+                 (static_supervisor/add spec)
+                 (static_supervisor/add spec)
+                 static_supervisor/start)
+             "static supervisor failed to start")]
+      (let [supervisor_pid (:pid started)]
+        (let? [_ (next_child_pid subject "same")]
+          (let? [_ (next_child_pid subject "same")]
+            (let? [_ (next_child_pid subject "same")]
+              (let? [_ (expect_timeout (process/receive_timeout subject 50))]
+                (ensure_supervisor_stopped supervisor_pid)))))))))
+
+(test
+  "static_supervisor/OneForOne restarts only the failed child"
+  (one_for_one_case))
+
+(test
+  "static_supervisor/RestForOne restarts the failed child and the rest"
+  (rest_for_one_case))
+
+(test
+  "static_supervisor/OneForAll restarts all children when one fails"
+  (one_for_all_case))
+
+(test
+  "static_supervisor/add allows duplicate child specifications"
+  (duplicate_child_case))

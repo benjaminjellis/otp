@@ -1,0 +1,54 @@
+(use otp/actor)
+(use otp/actor [Started])
+(use otp/supervision)
+(use std/process)
+(use std/result [Result])
+(use std/testing [assert_eq])
+
+(let failing_start {}
+  (Error (actor/InitFailed "boom")))
+
+(test
+  "supervision/worker defaults to a permanent worker child"
+  (let [child (supervision/worker failing_start)]
+    (let? [_ (assert_eq (:restart child) supervision/Permanent)]
+      (let? [_ (assert_eq (:significant child) False)]
+        (assert_eq (:child_type child) (supervision/Worker 5000))))))
+
+(test
+  "supervision/supervisor defaults to a permanent supervisor child"
+  (let [child (supervision/supervisor failing_start)]
+    (let? [_ (assert_eq (:restart child) supervision/Permanent)]
+      (let? [_ (assert_eq (:significant child) False)]
+        (assert_eq (:child_type child) supervision/Supervisor)))))
+
+(test
+  "supervision/timeout only updates worker children"
+  (let [worker_child (supervision/timeout
+          1500
+          (supervision/worker failing_start))
+        supervisor_child (supervision/timeout
+          1500
+          (supervision/supervisor failing_start))]
+    (let? [_ (assert_eq (:child_type worker_child) (supervision/Worker 1500))]
+      (assert_eq (:child_type supervisor_child) supervision/Supervisor))))
+
+(test
+  "supervision/significant and restart update child settings"
+  (let [child (|> (supervision/worker failing_start)
+                  (supervision/significant True)
+                  (supervision/restart supervision/Transient))]
+    (let? [_ (assert_eq (:significant child) True)]
+      (assert_eq (:restart child) supervision/Transient))))
+
+(test
+  "supervision/map_data transforms started child data"
+  (let [start_number (f {} -> (Ok (Started :pid (process/self) :data 41)))
+        child (supervision/worker start_number)
+        mapped (supervision/map_data (f {n} -> (+ n 1)) child)]
+    (let? [_ (assert_eq (:restart mapped) supervision/Permanent)]
+      (let? [_ (assert_eq (:significant mapped) False)]
+        (let? [_ (assert_eq (:child_type mapped) (supervision/Worker 5000))]
+          (match ((:start mapped))
+            (Ok started) ~> (assert_eq (:data started) 42)
+            (Error _) ~> (Error "mapped child failed to start")))))))
