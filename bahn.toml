@@ -4,5 +4,5 @@ version = "0.0.1"
 mond_version = "0.0.6"
 
 [dependencies]
-std = { git = "git@github.com:benjaminjellis/mond-std.git", tag= "0.0.5" }
+std = { git = "git@github.com:benjaminjellis/mond-std.git", tag = "0.0.7" }
 

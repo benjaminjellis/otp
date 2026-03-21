@@ -2,7 +2,11 @@
 (use std/process)
 (use std/result [Result])
 (use std/option [Option])
+(use std/atom)
+(use std/unknown [Unknown])
+(use std/pair [Pair])
 (use std/unknown)
+(use system [Mode DebugState SystemMessage StatusInfo])
 
 (pub type ['s 'm] Next
   [(Continue ~ ContinuePayload 's 'm)
@@ -21,10 +25,11 @@
 (pub let stop_abnormal {reason}
   (Stop (Abnormal (unknown/from_string reason))))
 
-(pub let with_selctor {value selector}
+(pub let with_selector {selector value}
   (match value
     (Continue payload) ~> (Continue
-      (ContinuePayload :state (:state payload) :selector (Some selector)))
+                            (with payload
+                              :selector (Some selector)))
     (Stop _) ~> value))
 
 (pub type ['d] Started
@@ -39,8 +44,14 @@
 (pub let initialised {state}
   (Initialised :state state :selector None :return ()))
 
-(pub let returning {result initialised}
-  (with initialised
+(extern let erase ~ ('a -> Unknown) gleam_otp_external/identity)
+
+(pub let selecting {selector initialised_value}
+  (with initialised_value
+    :selector (Some selector)))
+
+(pub let returning {result initialised_value}
+  (with initialised_value
     :return result))
 
 (pub type ['s 'm 'r] Builder
@@ -57,25 +68,219 @@
     (Builder
       :initialise init
       :initialisation_timeout 1000
-      :on_message (f {state _} -> (continue state))
+      :on_message (f {current_state _} -> (continue current_state))
       :name None)))
 
 (pub let new_with_initialiser {timeout initialise}
   (Builder
     :initialise initialise
     :initialisation_timeout timeout
-    :on_message (f {state _} -> (continue state))
+    :on_message (f {current_state _} -> (continue current_state))
     :name None))
 
-(pub let on_message {builder handler}
+(pub let on_message {handler builder}
   (with builder
     :on_message handler))
 
-(pub let named {builder name}
+(pub let named {name builder}
   (with builder
     :name (Some name)))
+
+(pub let exit_process {reason}
+  (match reason
+    (Abnormal reason) ~> (process/send_abnormal_exit (process/self) reason)
+    Killed ~> (process/kill (process/self))
+    _ ~> ())
+  reason)
 
 (pub type StartError
   [InitTimeout
    (InitFailed ~ String)
    (InitExited ~ ExitReason)])
+
+(type ['d] StartInitMessage
+  [(Ack ~ (Result 'd String))
+   (Mon ~ ExitReason)
+   StartTimeout])
+
+(extern type MonitorRef)
+(extern let monitor_process ~ (Pid -> MonitorRef) mond_otp_actor_helpers/monitor_process)
+(extern let demonitor_process ~ (MonitorRef -> Unit) mond_otp_actor_helpers/demonitor_process)
+(extern let kill_process ~ (Pid -> Unit) mond_otp_actor_helpers/kill_process)
+(extern let wait_for_start ~ ((Subject (Result 'd String))
+  -> MonitorRef
+  -> Int
+  -> (StartInitMessage 'd)) mond_otp_actor_helpers/wait_for_start)
+(extern let receive_forever ~ ((Subject 'm) -> 'm) mond_otp_actor_helpers/receive_forever)
+(extern let kill_self ~ (Unit -> Unit) mond_otp_actor_helpers/kill_self)
+(extern let exit_abnormal ~ (unknown/Unknown -> Unit) mond_otp_actor_helpers/exit_abnormal)
+(extern let call_timeout ~ (Unit -> 'a) mond_otp_actor_helpers/call_timeout)
+
+(let try_register_self {name}
+  (match (process/register (process/self) name)
+    (Ok _) ~> (Ok ())
+    (Error _) ~> (Error "name already registered")))
+
+(let new_subject_for_actor {builder}
+  (match (:name builder)
+    None ~> (Ok (process/new_subject))
+    (Some name) ~> (let? [_ (try_register_self name)]
+                     (Ok (process/named_subject name)))))
+
+(pub let run_actor_init {builder _parent}
+  (let? [subject (new_subject_for_actor builder)
+         init_value ((:initialise builder) subject)]
+    (Ok (Pair :first subject :second init_value))))
+
+(type ['m] Message
+  [(Message ~ 'm)
+   (System ~ SystemMessage)
+   (Unexpected ~ Unknown)])
+
+(type ['s 'm] Self
+  [(:mode ~ Mode)
+   (:parent ~ Pid)
+   (:state ~ 's)
+   (:message_handler ~ ('s -> 'm -> Next 's 'm))
+   (:debug_state ~ DebugState)
+   (:selector ~ Selector (Message 'm))])
+
+(extern let convert_system_message ~ (Unknown -> Message 'm) gleam_otp_external/convert_system_message)
+
+(let process_status_info {self}
+  (StatusInfo
+    :module (atom/create "gleam@otp@actor")
+    :parent (:parent self)
+    :mode (:mode self)
+    :debug_state (:debug_state self)
+    :state (erase (:state self))))
+
+(let select_system_messages {selector}
+  (process/select_record
+    (atom/create "system")
+    2
+    convert_system_message
+    selector))
+
+(let receive_message {self}
+  (let [base_selector (match (:mode self)
+                       Suspended ~> (process/new_selector)
+                       Running ~> (|> (process/new_selector)
+                                      (process/select_other Unexpected)
+                                      (process/merge_selector (:selector self))))
+        selector (select_system_messages base_selector)]
+    (process/selector_receive_forever selector)))
+
+;; (let handle_system_message {system_message state}
+;;   (match system_message
+;;     (GetState callback) ~> (
+;;     do (callback (erase (:state self))
+;;       (loop  )
+;;
+;;     )
+;;     (Resume callback) ~> (io/debug "todo")
+;;     (Suspend callback) ~> (io/debug "todo")
+;;     (GetStatus callback) ~> (io/debug "todo")) 
+(let loop {self}
+  (match (receive_message self)
+    (System s) ~>
+      (match s
+        (GetState callback) ~>
+          (do (callback (erase (:state self)))
+              (loop self))
+        (Resume callback) ~>
+          (do (callback)
+              (loop
+                (with self
+                  :mode Running)))
+        (Suspend callback) ~>
+          (do (callback)
+              (loop
+                (with self
+                  :mode Suspended)))
+        (GetStatus callback) ~>
+          (do (callback (process_status_info self))
+              (loop self)))
+    (Unexpected message) ~>
+      (loop self)
+    (Message msg) ~>
+      (match ((:message_handler self) (:state self) msg)
+        (Stop reason) ~> (exit_process reason)
+        (Continue payload) ~> (let [state (:state payload)
+                                    selector (match (:selector payload)
+                                      None ~> (:selector self)
+                                      (Some selected) ~> (process/map_selector
+                                                           Message
+                                                           selected))
+                                    next_self (with self
+                                      :state state
+                                      :selector selector)]
+                                (loop next_self)))))
+
+;;;  Init was OK, send the subject to the parent and start handling messages.
+(let run_actor_init_sucess {subject init_result ack parent builder}
+  (let [base_selector (match (:selector init_result)
+                        (Some x) ~> x
+                        None ~> (process/select_map
+                                  subject
+                                  (f {value} -> value)
+                                  (process/new_selector)))
+        selector (process/map_selector Message base_selector)]
+    (do (process/send ack (Ok (:return init_result)))
+        (let [state (:state init_result)
+              mh (:on_message builder)
+              debug_state (system/debug_state [])
+              self (Self
+                :state state
+                :parent parent
+                :selector selector
+                :message_handler mh
+                :debug_state debug_state
+                :mode Running)]
+          (loop self)))))
+
+(pub let initialise_actor {builder parent ack}
+  (match (run_actor_init builder parent)
+    (Ok pair) ~>
+      (do (run_actor_init_sucess
+            (:first pair)
+            (:second pair)
+            ack
+            parent
+            builder)
+          ())
+    (Error err) ~>
+      (do (process/send ack (Error err))
+          ())))
+
+(pub let start {builder}
+  (let [timeout (:initialisation_timeout builder)
+        ack_subject (process/new_subject)
+        parent (process/self)
+        child (process/spawn (f {_} ->
+          (initialise_actor builder parent ack_subject)))
+        monitor (monitor_process child)
+        result (wait_for_start ack_subject monitor timeout)
+        _ (demonitor_process monitor)]
+    (match result
+      (Ack (Ok data)) ~> (Ok (Started :pid child :data data))
+      (Ack (Error reason)) ~> (Error (InitFailed reason))
+      (Mon reason) ~> (Error (InitExited reason))
+      StartTimeout ~>
+        (do (process/unlink child)
+            (kill_process child)
+            (Error InitTimeout)))))
+
+;;; Send a message over a subject.
+(pub let send {subject msg}
+  (process/send subject msg))
+
+;;; Send a synchronous message and wait for a response.
+;;; If no response arrives in time this function crashes the caller.
+(pub let call {subject timeout make_message}
+  (let [reply_subject (process/new_subject)
+        message (make_message reply_subject)
+        _ (process/send subject message)]
+    (match (process/receive_timeout reply_subject timeout)
+      (Ok reply) ~> reply
+      (Error _) ~> (call_timeout))))
