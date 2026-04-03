@@ -1,0 +1,67 @@
+(use otp/actor)
+(use otp/system)
+(use std/process)
+(use std/result [Result])
+(use std/testing [assert_eq])
+(use std/unknown)
+(extern let unwrap_sys_get_state ~ (unknown/Unknown -> unknown/Unknown) otp_test_helpers/unwrap_sys_get_state)
+
+(type CounterMessage
+  [(Probe ~ (process/Subject Int))
+   Shutdown])
+
+(let handle_counter_message {count message}
+  (match message
+    (Probe reply_subject) ~>
+      (do (process/send reply_subject count)
+          (actor/continue (+ count 1)))
+    Shutdown ~> (actor/stop)))
+
+(let expect_timeout {result}
+  (match result
+    (Error err) ~> (assert_eq (process/error_kind err) "timeout")
+    (Ok _) ~> (Error "expected timeout")))
+
+(test
+  "system/get_state returns actor state and suspend/resume pauses message handling"
+  (let [builder (actor/on_message handle_counter_message (actor/new 10))]
+    (match (actor/start builder)
+      (Error _) ~> (Error "actor failed to start")
+      (Ok started) ~> (let [subject (:data started)
+                            pid (:pid started)
+                            reply_after_resume (process/new_subject)]
+                        (let? [_ (assert_eq
+                                 (actor/call
+                                   subject
+                                   200
+                                   (f {reply} -> (Probe reply)))
+                                 10)]
+                          (let? [_ (assert_eq
+                                   (unknown/run
+                                     (unwrap_sys_get_state
+                                       (system/get_state pid))
+                                     (unknown/int))
+                                   (Ok 11))]
+                            (do (system/suspend pid)
+                                (let? [_ (assert_eq
+                                         (actor/send
+                                           subject
+                                           (Probe reply_after_resume))
+                                         (Ok ()))]
+                                  (let? [_ (expect_timeout
+                                           (process/receive_timeout
+                                             reply_after_resume
+                                             50))]
+                                    (do (system/resume pid)
+                                        (let? [_ (assert_eq
+                                                 (process/receive_timeout
+                                                   reply_after_resume
+                                                   200)
+                                                 (Ok 11))]
+                                          (let? [_ (assert_eq
+                                                   (actor/send subject Shutdown)
+                                                   (Ok ()))]
+                                            (do (process/sleep 20)
+                                                (assert_eq
+                                                  (process/is_alive pid)
+                                                  False))))))))))))))

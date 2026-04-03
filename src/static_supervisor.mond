@@ -1,0 +1,136 @@
+(use std/atom [Atom])
+(use std/atom)
+(use std/list)
+(use std/map [Map])
+(use std/map)
+(use std/process [Pid])
+(use std/result [Result])
+(use std/unknown [Unknown])
+(use std/unknown)
+(use actor [Started StartError])
+(use supervision [ChildSpecification Restart ChildType])
+(use supervision)
+
+(pub type Supervisor
+  [(:pid ~ Pid)])
+
+(pub type Strategy
+  [OneForOne
+   OneForAll
+   RestForOne])
+
+(pub type AutoShutdown
+  [Never
+   AnySignificant
+   AllSignificant])
+
+(pub type Builder
+  [(:strategy ~ Strategy)
+   (:intensity ~ Int)
+   (:period ~ Int)
+   (:auto_shutdown ~ AutoShutdown)
+   (:children ~ (List (ChildSpecification Unit)))])
+
+(pub let new {strategy}
+  (Builder
+    :strategy strategy
+    :intensity 2
+    :period 5
+    :auto_shutdown Never
+    :children []))
+
+(pub let restart_tolerance {intensity period builder}
+  (with builder
+    :intensity intensity
+    :period period))
+
+(pub let auto_shutdown {value builder}
+  (with builder
+    :auto_shutdown value))
+
+(pub let add {child builder}
+  (with builder
+    :children (list/prepend
+      (supervision/map_data (f {_} -> ()) child)
+      (:children builder))))
+
+(extern let start_static_supervisor ~ (Atom
+  -> Atom
+  -> Int
+  -> Int
+  -> Atom
+  -> (List (Map Atom Unknown))
+  -> (Result Pid Unknown)) mond_otp_supervisor_helpers/start_static_supervisor)
+(extern let convert_erlang_start_error ~ (Unknown -> StartError) gleam_otp_external/convert_erlang_start_error)
+
+(pub let start {builder}
+  (match (start_static_supervisor
+    (atom/create "p_otp_static_supervisor")
+    (strategy_atom (:strategy builder))
+    (:intensity builder)
+    (:period builder)
+    (auto_shutdown_atom (:auto_shutdown builder))
+    (list/map child_config (list/reverse (:children builder))))
+    (Ok pid) ~> (Ok (Started :pid pid :data (Supervisor :pid pid)))
+    (Error error) ~> (Error (convert_erlang_start_error error))))
+
+(pub let supervised {builder}
+  (supervision/supervisor (f {} -> (start builder))))
+
+(pub let init {start_data}
+  (Ok start_data))
+
+(pub let start_child_callback {starter}
+  (match (starter)
+    (Ok started) ~> (Ok (:pid started))
+    (Error error) ~> (Error error)))
+
+(let strategy_atom {strategy}
+  (match strategy
+    OneForOne ~> (atom/create "one_for_one")
+    OneForAll ~> (atom/create "one_for_all")
+    RestForOne ~> (atom/create "rest_for_one")))
+
+(let auto_shutdown_atom {value}
+  (match value
+    Never ~> (atom/create "never")
+    AnySignificant ~> (atom/create "any_significant")
+    AllSignificant ~> (atom/create "all_significant")))
+
+(let restart_atom {restart}
+  (match restart
+    Permanent ~> (atom/create "permanent")
+    Transient ~> (atom/create "transient")
+    Temporary ~> (atom/create "temporary")))
+
+(let child_config {child}
+  (let [start_key (atom/create "start")
+        restart_key (atom/create "restart")
+        significant_key (atom/create "significant")
+        type_key (atom/create "type")
+        shutdown_key (atom/create "shutdown")
+        base (map/new)
+        with_start (map/put start_key (unknown/from (:start child)) base)
+        with_restart (map/put
+          restart_key
+          (unknown/from (restart_atom (:restart child)))
+          with_start)
+        with_significant (map/put
+          significant_key
+          (unknown/from (:significant child))
+          with_restart)]
+    (match (:child_type child)
+      (Worker ms) ~> (let [with_type (map/put
+                             type_key
+                             (unknown/from (atom/create "worker"))
+                             with_significant)]
+                       (map/put shutdown_key (unknown/from ms) with_type))
+      supervision/Supervisor ~> (let [with_type (map/put
+                                        type_key
+                                        (unknown/from
+                                          (atom/create "supervisor"))
+                                        with_significant)]
+                                  (map/put
+                                    shutdown_key
+                                    (unknown/from -1)
+                                    with_type)))))

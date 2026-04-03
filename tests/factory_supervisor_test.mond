@@ -1,0 +1,268 @@
+(use otp/actor)
+(use otp/factory_supervisor)
+(use otp/supervision)
+(use std/process)
+(use std/result [Result])
+(use std/testing [assert_eq assert_ne])
+
+(type StartedChild
+  [(StartedChild ~ String process/Pid)])
+
+(let expect_ok {result message}
+  (match result
+    (Ok value) ~> (Ok value)
+    (Error _) ~> (Error message)))
+
+(let expect_timeout {result}
+  (match result
+    (Error err) ~> (assert_eq (process/error_kind err) "timeout")
+    (Ok _) ~> (Error "expected timeout")))
+
+(let next_child_pid {subject expected_name}
+  (match (process/receive_timeout subject 300)
+    (Ok (StartedChild name pid)) ~> (let? [_ (assert_eq name expected_name)]
+                                      (Ok pid))
+    (Error _) ~> (Error "timed out waiting for child start")
+    (Ok _) ~> (Error "unexpected child start notice")))
+
+(let cleanup_supervisor {pid}
+  (do (process/send_exit pid)
+      (process/sleep 50)))
+
+(let ensure_supervisor_stopped {pid}
+  (do (cleanup_supervisor pid)
+      (assert_eq (process/is_alive pid) False)))
+
+(let init_notifier_child {subject name}
+  (|> (actor/new_with_initialiser
+        50
+        (f {self_subject} ->
+          (do (process/send subject (StartedChild name (process/self)))
+              (Ok
+                (|> (actor/initialised name)
+                    (actor/returning self_subject))))))
+      (actor/on_message (f {_state _message} -> (actor/stop)))
+      actor/start))
+
+(let transient_case {}
+  (let [subject (process/new_subject)
+        builder (factory_supervisor/worker_child (init_notifier_child subject))]
+    (let? [started (expect_ok
+             (factory_supervisor/start builder)
+             "factory supervisor failed to start")]
+      (let [supervisor_pid (:pid started)
+            supervisor_ref (:data started)]
+        (let? [child1 (expect_ok
+                 (factory_supervisor/start_child supervisor_ref "1")
+                 "child 1 failed to start")]
+          (let? [child2 (expect_ok
+                   (factory_supervisor/start_child supervisor_ref "2")
+                   "child 2 failed to start")]
+            (let? [child3 (expect_ok
+                     (factory_supervisor/start_child supervisor_ref "3")
+                     "child 3 failed to start")]
+              (let [p1 (:pid child1)
+                    p2 (:pid child2)
+                    p3 (:pid child3)
+                    p3_subject (:data child3)]
+                (let? [_ (next_child_pid subject "1")]
+                  (let? [_ (next_child_pid subject "2")]
+                    (let? [_ (next_child_pid subject "3")]
+                      (let? [_ (expect_timeout
+                               (process/receive_timeout subject 50))]
+                        (do (process/kill p1)
+                            (let? [p1_2 (next_child_pid subject "1")]
+                              (let? [_ (assert_ne p1_2 p1)]
+                                (let? [_ (expect_timeout
+                                         (process/receive_timeout subject 50))]
+                                  (do (process/kill p2)
+                                      (let? [p2_2 (next_child_pid subject "2")]
+                                        (let? [_ (assert_ne p2_2 p2)]
+                                          (let? [_ (expect_timeout
+                                                   (process/receive_timeout
+                                                     subject
+                                                     50))]
+                                            (do (process/send p3_subject ())
+                                                (let? [_ (expect_timeout
+                                                         (process/receive_timeout
+                                                           subject
+                                                           50))]
+                                                  (let? [_ (assert_eq
+                                                           (process/is_alive p3)
+                                                           False)]
+                                                    (ensure_supervisor_stopped
+                                                      supervisor_pid))))))))))))))))))))))))
+
+(let temporary_case {}
+  (let [subject (process/new_subject)
+        builder (|> (factory_supervisor/worker_child
+                      (init_notifier_child subject))
+                    (factory_supervisor/restart_strategy supervision/Temporary)
+                    (factory_supervisor/restart_tolerance 10 5))]
+    (let? [started (expect_ok
+             (factory_supervisor/start builder)
+             "factory supervisor failed to start")]
+      (let [supervisor_pid (:pid started)
+            supervisor_ref (:data started)]
+        (let? [child1 (expect_ok
+                 (factory_supervisor/start_child supervisor_ref "1")
+                 "child 1 failed to start")]
+          (let? [child2 (expect_ok
+                   (factory_supervisor/start_child supervisor_ref "2")
+                   "child 2 failed to start")]
+            (let? [child3 (expect_ok
+                     (factory_supervisor/start_child supervisor_ref "3")
+                     "child 3 failed to start")]
+              (let [p1 (:pid child1)
+                    p2 (:pid child2)
+                    p3 (:pid child3)
+                    p3_subject (:data child3)]
+                (let? [_ (next_child_pid subject "1")]
+                  (let? [_ (next_child_pid subject "2")]
+                    (let? [_ (next_child_pid subject "3")]
+                      (let? [_ (expect_timeout
+                               (process/receive_timeout subject 50))]
+                        (do (process/kill p1)
+                            (let? [_ (expect_timeout
+                                     (process/receive_timeout subject 50))]
+                              (do (process/kill p2)
+                                  (let? [_ (expect_timeout
+                                           (process/receive_timeout subject 50))]
+                                    (do (process/send p3_subject ())
+                                        (let? [_ (expect_timeout
+                                                 (process/receive_timeout
+                                                   subject
+                                                   50))]
+                                          (let? [_ (assert_eq
+                                                   (process/is_alive p1)
+                                                   False)]
+                                            (let? [_ (assert_eq
+                                                     (process/is_alive p2)
+                                                     False)]
+                                              (let? [_ (assert_eq
+                                                       (process/is_alive p3)
+                                                       False)]
+                                                (ensure_supervisor_stopped
+                                                  supervisor_pid))))))))))))))))))))))
+
+(let permanent_case_after_start {subject p1 p2 p3 p3_subject supervisor_pid}
+  (let? [_ (next_child_pid subject "1")]
+    (let? [_ (next_child_pid subject "2")]
+      (let? [_ (next_child_pid subject "3")]
+        (let? [_ (expect_timeout (process/receive_timeout subject 50))]
+          (do (process/kill p1)
+              (let? [p1_2 (next_child_pid subject "1")]
+                (let? [_ (assert_ne p1_2 p1)]
+                  (do (process/kill p2)
+                      (let? [p2_2 (next_child_pid subject "2")]
+                        (let? [_ (assert_ne p2_2 p2)]
+                          (do (process/send p3_subject ())
+                              (let? [p3_2 (next_child_pid subject "3")]
+                                (let? [_ (assert_ne p3_2 p3)]
+                                  (let? [_ (expect_timeout
+                                           (process/receive_timeout subject 50))]
+                                    (ensure_supervisor_stopped supervisor_pid))))))))))))))))
+
+(let permanent_case {}
+  (let [subject (process/new_subject)
+        builder (|> (factory_supervisor/worker_child
+                      (init_notifier_child subject))
+                    (factory_supervisor/restart_strategy supervision/Permanent)
+                    (factory_supervisor/restart_tolerance 10 5))]
+    (let? [started (expect_ok
+             (factory_supervisor/start builder)
+             "factory supervisor failed to start")]
+      (let [supervisor_pid (:pid started)
+            supervisor_ref (:data started)]
+        (let? [child1 (expect_ok
+                 (factory_supervisor/start_child supervisor_ref "1")
+                 "child 1 failed to start")]
+          (let? [child2 (expect_ok
+                   (factory_supervisor/start_child supervisor_ref "2")
+                   "child 2 failed to start")]
+            (let? [child3 (expect_ok
+                     (factory_supervisor/start_child supervisor_ref "3")
+                     "child 3 failed to start")]
+              (permanent_case_after_start
+                subject
+                (:pid child1)
+                (:pid child2)
+                (:pid child3)
+                (:data child3)
+                supervisor_pid))))))))
+
+(let duplicate_child_case {}
+  (let [subject (process/new_subject)
+        builder (factory_supervisor/worker_child (init_notifier_child subject))]
+    (let? [started (expect_ok
+             (factory_supervisor/start builder)
+             "factory supervisor failed to start")]
+      (let [supervisor_pid (:pid started)
+            supervisor_ref (:data started)]
+        (let? [_ (expect_ok
+                 (factory_supervisor/start_child supervisor_ref "same")
+                 "first child failed to start")]
+          (let? [_ (expect_ok
+                   (factory_supervisor/start_child supervisor_ref "same")
+                   "second child failed to start")]
+            (let? [_ (expect_ok
+                     (factory_supervisor/start_child supervisor_ref "same")
+                     "third child failed to start")]
+              (let? [_ (next_child_pid subject "same")]
+                (let? [_ (next_child_pid subject "same")]
+                  (let? [_ (next_child_pid subject "same")]
+                    (let? [_ (expect_timeout
+                             (process/receive_timeout subject 50))]
+                      (ensure_supervisor_stopped supervisor_pid))))))))))))
+
+(let named_case {}
+  (let [name (process/new_name "factory-supervisor-name")
+        subject (process/new_subject)
+        builder (|> (factory_supervisor/worker_child
+                      (init_notifier_child subject))
+                    (factory_supervisor/named name))]
+    (let? [started (expect_ok
+             (factory_supervisor/start builder)
+             "named factory supervisor failed to start")]
+      (let [supervisor_pid (:pid started)
+            named_supervisor (factory_supervisor/get_by_name name)]
+        (let? [_ (match (factory_supervisor/start builder)
+                 (Error (actor/InitFailed reason)) ~> (assert_eq
+                                                        reason
+                                                        "already started")
+                 (Error _) ~> (Error "expected InitFailed for duplicate name")
+                 (Ok _) ~> (Error "expected duplicate named start to fail"))]
+          (let? [child1 (expect_ok
+                   (factory_supervisor/start_child named_supervisor "1")
+                   "named child 1 failed to start")]
+            (let? [child2 (expect_ok
+                     (factory_supervisor/start_child named_supervisor "2")
+                     "named child 2 failed to start")]
+              (let? [_ (assert_eq
+                       (process/receive_timeout subject 300)
+                       (Ok (StartedChild "1" (:pid child1))))]
+                (let? [_ (assert_eq
+                         (process/receive_timeout subject 300)
+                         (Ok (StartedChild "2" (:pid child2))))]
+                  (let? [_ (expect_timeout (process/receive_timeout subject 50))]
+                    (ensure_supervisor_stopped supervisor_pid)))))))))))
+
+(test
+  "factory_supervisor/worker_child defaults to transient restart behaviour"
+  (transient_case))
+
+(test
+  "factory_supervisor/restart_strategy Temporary does not restart children"
+  (temporary_case))
+
+(test
+  "factory_supervisor/restart_strategy Permanent restarts after normal exits"
+  (permanent_case))
+
+(test
+  "factory_supervisor/start_child allows duplicate child arguments"
+  (duplicate_child_case))
+
+(test
+  "factory_supervisor/named registers the supervisor and detects name clashes"
+  (named_case))

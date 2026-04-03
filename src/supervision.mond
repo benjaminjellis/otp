@@ -1,0 +1,58 @@
+(use std/result [Result])
+(use actor [Started StartError])
+
+(pub type Restart
+  [Permanent
+   Transient
+   Temporary])
+
+(pub type ChildType
+  [(Worker ~ Int)
+   Supervisor])
+
+(pub type ['d] ChildSpecification
+  [(:start ~ (Unit -> (Result (Started 'd) StartError)))
+   (:restart ~ Restart)
+   (:significant ~ Bool)
+   (:child_type ~ ChildType)])
+
+(pub let worker {start}
+  (ChildSpecification
+    :start start
+    :restart Permanent
+    :significant False
+    :child_type (Worker 5000)))
+
+(pub let supervisor {start}
+  (ChildSpecification
+    :start start
+    :restart Permanent
+    :significant False
+    :child_type Supervisor))
+
+(pub let significant {value child}
+  (with child
+    :significant value))
+
+(pub let timeout {ms child}
+  (match (:child_type child)
+    (Worker _) ~> (with child
+                    :child_type (Worker ms))
+    _ ~> child))
+
+(pub let restart {restart_value child}
+  (with child
+    :restart restart_value))
+
+(pub let map_data {transform child}
+  (ChildSpecification
+    :start (f {} ->
+      (match ((:start child))
+        (Ok started) ~> (Ok
+                          (Started
+                            :pid (:pid started)
+                            :data (transform (:data started))))
+        (Error error) ~> (Error error)))
+    :restart (:restart child)
+    :significant (:significant child)
+    :child_type (:child_type child)))

@@ -25,3 +25,15 @@
    (GetStatus ~ (StatusInfo -> Unit))])
 
 (pub extern let debug_state ~ (List DebugOption -> DebugState) sys/debug_options)
+(pub extern let get_state ~ (Pid -> Unknown) sys/get_state)
+(extern let erl_suspend ~ (Pid -> Unknown) sys/suspend)
+
+(pub let suspend {pid}
+  (do (erl_suspend pid))
+  ())
+
+(extern let erl_resume ~ (Pid -> Unknown) sys/resume)
+
+(pub let resume {pid}
+  (do (erl_resume pid))
+  ())

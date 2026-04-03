@@ -1,0 +1,157 @@
+(use std/atom [Atom])
+(use std/atom)
+(use std/option [Option])
+(use std/pair [Pair])
+(use std/process [Pid Name ProcessError])
+(use std/process)
+(use std/result [Result])
+(use std/unknown [Unknown])
+(use actor [Started StartError InitFailed])
+(use supervision [Restart
+ ChildType
+ Permanent
+ Transient
+ Temporary
+ Worker
+ Supervisor])
+(use supervision)
+(pub extern type ['arg 'data] Message)
+
+(pub type ['arg 'data] SupervisorRef
+  [(PidSupervisor ~ Pid)
+   (NamedSupervisor ~ (Name (Message 'arg 'data)))])
+
+(pub type ['arg 'data] Builder
+  [(:child_type ~ ChildType)
+   (:template ~ ('arg -> (Result (Started 'data) StartError)))
+   (:restart_strategy ~ Restart)
+   (:intensity ~ Int)
+   (:period ~ Int)
+   (:name ~ (Option (Name (Message 'arg 'data))))])
+
+(pub let get_by_name {name}
+  (NamedSupervisor name))
+
+(pub let worker_child {template}
+  (Builder
+    :child_type (Worker 5000)
+    :template template
+    :restart_strategy Transient
+    :intensity 2
+    :period 5
+    :name None))
+
+(pub let supervisor_child {template}
+  (Builder
+    :child_type Supervisor
+    :template template
+    :restart_strategy Transient
+    :intensity 2
+    :period 5
+    :name None))
+
+(pub let named {name builder}
+  (with builder
+    :name (Some name)))
+
+(pub let restart_tolerance {intensity period builder}
+  (with builder
+    :intensity intensity
+    :period period))
+
+(pub let timeout {ms builder}
+  (match (:child_type builder)
+    (Worker _) ~> (with builder
+                    :child_type (Worker ms))
+    _ ~> builder))
+
+(pub let restart_strategy {restart_value builder}
+  (match (:child_type builder)
+    (Worker _) ~> (with builder
+                    :restart_strategy restart_value)
+    _ ~> builder))
+
+(extern let start_factory_supervisor ~ (Atom
+  -> Int
+  -> Int
+  -> Atom
+  -> Atom
+  -> Int
+  -> ('arg -> (Result (Started 'data) StartError))
+  -> (Result Pid Unknown)) mond_otp_supervisor_helpers/start_factory_supervisor)
+(extern let convert_erlang_start_error ~ (Unknown -> StartError) gleam_otp_external/convert_erlang_start_error)
+(extern let start_factory_child_pid ~ (Pid
+  -> 'arg
+  -> (Result (Pair Pid 'data) StartError)) mond_otp_supervisor_helpers/start_factory_child_pid)
+(extern let start_factory_child_name ~ ((Name (Message 'arg 'data))
+  -> 'arg
+  -> (Result (Pair Pid 'data) StartError)) mond_otp_supervisor_helpers/start_factory_child_name)
+
+(pub let start {builder}
+  (match (start_factory_supervisor
+    (atom/create "p_otp_factory_supervisor")
+    (:intensity builder)
+    (:period builder)
+    (restart_atom (:restart_strategy builder))
+    (child_type_atom (:child_type builder))
+    (shutdown_value (:child_type builder))
+    (:template builder))
+    (Ok pid) ~> (finalise_named_start pid builder)
+    (Error error) ~> (Error (convert_erlang_start_error error))))
+
+(pub let supervised {builder}
+  (supervision/supervisor (f {} -> (start builder))))
+
+(pub let start_child {supervisor argument}
+  (match supervisor
+    (PidSupervisor pid) ~> (started_result_from_pair
+                             (start_factory_child_pid pid argument))
+    (NamedSupervisor name) ~> (started_result_from_pair
+                                (start_factory_child_name name argument))))
+
+(pub let init {start_data}
+  (Ok start_data))
+
+(pub let start_child_callback {starter argument}
+  (match (starter argument)
+    (Ok started) ~> (Ok (Pair :first (:pid started) :second (:data started)))
+    (Error error) ~> (Error error)))
+
+(let finalise_named_start {pid builder}
+  (match (:name builder)
+    None ~> (Ok (Started :pid pid :data (PidSupervisor pid)))
+    (Some name) ~>
+      (match (process/register pid name)
+        (Ok _) ~> (Ok (Started :pid pid :data (PidSupervisor pid)))
+        (Error NameAlreadyRegistered) ~>
+          (do (process/unlink pid)
+              (process/kill pid)
+              (Error (InitFailed "already started")))
+        (Error _) ~>
+          (do (process/unlink pid)
+              (process/kill pid)
+              (Error (InitFailed "failed to register supervisor"))))))
+
+(let started_result_from_pair {result}
+  (match result
+    (Ok pair_value) ~> (Ok
+                         (Started
+                           :pid (:first pair_value)
+                           :data (:second pair_value)))
+    (Error error) ~> (Error error)))
+
+(let restart_atom {restart}
+  (match restart
+    Permanent ~> (atom/create "permanent")
+    Transient ~> (atom/create "transient")
+    Temporary ~> (atom/create "temporary")))
+
+(let child_type_atom {child_type}
+  (match child_type
+    (Worker _) ~> (atom/create "worker")
+    Supervisor ~> (atom/create "supervisor")))
+
+(let shutdown_value {child_type}
+  (match child_type
+    (Worker ms) ~> ms
+    Supervisor ~> -1))
