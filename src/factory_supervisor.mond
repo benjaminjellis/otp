@@ -89,7 +89,7 @@
 
 (pub let start {builder}
   (match (start_factory_supervisor
-    (atom/create "p_otp_factory_supervisor")
+    (atom/create "otp_factory_supervisor_ref")
     (:intensity builder)
     (:period builder)
     (restart_atom (:restart_strategy builder))
