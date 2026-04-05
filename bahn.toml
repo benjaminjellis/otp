@@ -1,6 +1,6 @@
 [package]
 name = "otp"
-version = "0.0.2"
+version = "0.0.3"
 mond_version = "0.0.19"
 
 [dependencies]

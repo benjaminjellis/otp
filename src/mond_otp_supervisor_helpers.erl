@@ -3,7 +3,7 @@
 -export([
     start_static_supervisor/6,
     start_factory_supervisor/7,
-    start_factory_child_callback/2,
+    start_factory_child_callback/3,
     start_factory_child_pid/2,
     start_factory_child_name/2
 ]).
@@ -26,15 +26,15 @@ start_factory_supervisor(Module, Intensity, Period, Restart, Type, Shutdown, Tem
     },
     Child = #{
         id => 0,
-        start => {?MODULE, start_factory_child_callback, [Template]},
+        start => {?MODULE, start_factory_child_callback, [Module, Template]},
         restart => Restart,
         type => Type,
         shutdown => make_timeout(Shutdown)
     },
     supervisor:start_link(Module, {Flags, [Child]}).
 
-start_factory_child_callback(Template, Argument) ->
-    case p_otp_factory_supervisor:start_child_callback(Template, Argument) of
+start_factory_child_callback(Module, Template, Argument) ->
+    case Module:start_child_callback(Template, Argument) of
         {ok, {pair, Pid, Data}} ->
             {ok, Pid, Data};
         {error, Reason} ->
